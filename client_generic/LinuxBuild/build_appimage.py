@@ -6,16 +6,17 @@ Builds infinidream and packages it as a self-contained AppImage.
 
 Usage:
     cd client/client_generic/LinuxBuild
-    ./build.py
+    ./build_appimage.py            # prod
+    ./build_appimage.py --stage    # stage (api-stage.infinidream.ai)
 
-Output: infinidream-<arch>.AppImage in this directory.
+Output: infinidream-<arch>.AppImage (or infinidream-stage-<arch>.AppImage)
+in this directory.
 
 Requirements:
   - Build tools: cmake, gcc, g++, make, perl
   - curl / Python urllib  (downloads sources + linuxdeploy / appimagetool on first run)
   - zig         (used ONLY to compile OpenSSL and FFmpeg against glibc 2.35;
-                 the main binary uses system g++ for compatibility with
-                 the pre-built libsioclient_tls.a static archive)
+                 the main binary uses system g++)
                  Install: pacman -S zig  OR  apt install zig
   - nasm/yasm   (FFmpeg assembly optimisations; skipped gracefully if absent)
   - Vulkan headers >= 1.3.277 (FFmpeg Vulkan Video decode)
@@ -23,6 +24,7 @@ Requirements:
     The script sets APPIMAGE_EXTRACT_AND_RUN=1 automatically without FUSE.
 """
 
+import argparse
 import os
 import platform
 import shutil
@@ -151,7 +153,7 @@ FFMPEG_SRC_DIR   = DEPS_SRC / f"ffmpeg-{FFMPEG_VERSION}"
 FFMPEG_INSTALL   = SCRIPT_DIR / "ffmpeg-minimal"
 
 # Bump when FFmpeg configure flags change — forces a clean rebuild
-FFMPEG_CONFIG_TAG = "novdpau-vulkan-udp"
+FFMPEG_CONFIG_TAG = "hevc-h264-mp4-nonet-vulkan"
 
 LINUXDEPLOY_BIN  = f"linuxdeploy-{ARCH}.AppImage"
 APPIMAGETOOL_BIN = f"appimagetool-{ARCH}.AppImage"
@@ -185,8 +187,7 @@ def write_zig_wrappers() -> tuple[Path, Path]:
 
     zig cc wraps clang and enforces a hard glibc ABI ceiling at compile+link
     time via --target.  These wrappers are used ONLY for OpenSSL and FFmpeg.
-    The main infinidream binary is compiled with system g++ to preserve ABI
-    compatibility with the pre-built libsioclient_tls.a (libstdc++).
+    The main infinidream binary is compiled with system g++.
     """
     zig_cc  = TOOLS_DIR / "zig-cc"
     zig_cxx = TOOLS_DIR / "zig-cxx"
@@ -276,8 +277,9 @@ def build_openssl(zig_cc: Path, zig_cxx: Path) -> None:
 # ---------------------------------------------------------------------------
 def build_ffmpeg(zig_cc: Path, zig_cxx: Path) -> None:
     """
-    Build a minimal FFmpeg (h264/hevc decode with Vulkan Video, mov/mkv demux,
-    OpenSSL TLS).
+    Build a minimal FFmpeg aligned with overlays/ffmpeg (#556):
+    H.264/HEVC decode (with Vulkan Video hwaccels), mov demux, file protocol
+    only. No network/TLS/audio — libcurl owns HTTPS (ProgressiveHttpStream).
 
     Uses the zig wrappers so bundled .so files are glibc-2.35 clean.
     """
@@ -310,8 +312,6 @@ def build_ffmpeg(zig_cc: Path, zig_cxx: Path) -> None:
         f"--cc={zig_cc}",
         f"--cxx={zig_cxx}",
         f"--ld={zig_cc}",
-        f"--extra-cflags=-I{OPENSSL_INSTALL}/include",
-        f"--extra-ldflags=-L{OPENSSL_INSTALL}/lib",
         "--disable-everything",
         "--enable-shared",
         "--disable-static",
@@ -320,19 +320,6 @@ def build_ffmpeg(zig_cc: Path, zig_cxx: Path) -> None:
         "--enable-avcodec",
         "--enable-avutil",
         "--enable-swscale",
-        "--enable-swresample",
-        "--enable-network",
-        "--enable-openssl",
-        "--enable-protocol=file",
-        "--enable-protocol=http",
-        "--enable-protocol=https",
-        "--enable-protocol=tcp",
-        "--enable-protocol=tls",
-        # Since FFmpeg 8, tls_openssl.c includes DTLS code that calls into
-        # udp.c, so the TLS protocol needs UDP built in to link.
-        "--enable-protocol=udp",
-        "--enable-demuxer=mov",
-        "--enable-demuxer=matroska",
         "--enable-decoder=h264",
         "--enable-decoder=hevc",
         "--enable-parser=h264",
@@ -345,6 +332,9 @@ def build_ffmpeg(zig_cc: Path, zig_cxx: Path) -> None:
         "--enable-vulkan",
         "--enable-hwaccel=h264_vulkan",
         "--enable-hwaccel=hevc_vulkan",
+        "--enable-demuxer=mov",
+        "--enable-protocol=file",
+        "--disable-network",
         "--disable-doc",
         "--disable-programs",
         "--disable-vdpau",
@@ -437,13 +427,12 @@ def compile_glibc_shim() -> Path:
 # ---------------------------------------------------------------------------
 # CMake build
 # ---------------------------------------------------------------------------
-def build_infinidream(shim_obj: Path) -> None:
+def build_infinidream(shim_obj: Path, stage: bool) -> None:
     """
     Build infinidream (Release) with system g++.
 
-    System g++ is used (not zig) because zig c++ uses libc++ (LLVM ABI) while
-    libsioclient_tls.a was compiled with libstdc++ (GNU ABI).  The shim object
-    is injected via CMAKE_EXE_LINKER_FLAGS to intercept versioned symbol bindings.
+    The glibc compat shim object is injected via CMAKE_EXE_LINKER_FLAGS to
+    intercept versioned symbol bindings.
     """
     nproc = os.cpu_count() or 1
 
@@ -471,6 +460,7 @@ def build_infinidream(shim_obj: Path) -> None:
         f"-DOPENSSL_ROOT_DIR={OPENSSL_INSTALL}",
         "-DBoost_USE_STATIC_LIBS=ON",
         f"-DCMAKE_EXE_LINKER_FLAGS={linker_flags}",
+        f"-DINFINIDREAM_STAGE={'ON' if stage else 'OFF'}",
     ], env={"PKG_CONFIG_PATH": pkg_config_path, **os.environ})
 
     log(f"Compiling ({nproc} jobs) ...")
@@ -630,6 +620,14 @@ def create_appimage(appimagetool: Path) -> None:
 # Main
 # ---------------------------------------------------------------------------
 def main() -> None:
+    global OUTPUT_APPIMAGE
+    parser = argparse.ArgumentParser(description="Build the infinidream Linux AppImage.")
+    parser.add_argument("--stage", action="store_true",
+                        help="build against api-stage.infinidream.ai")
+    args = parser.parse_args()
+    if args.stage:
+        OUTPUT_APPIMAGE = SCRIPT_DIR / f"infinidream-stage-{ARCH}.AppImage"
+
     # Clean AppDir and cmake build tree unconditionally at startup
     if APPDIR.exists():
         shutil.rmtree(APPDIR)
@@ -656,7 +654,7 @@ def main() -> None:
     linuxdeploy, appimagetool = prepare_appimage_tools()
 
     shim_obj = compile_glibc_shim()
-    build_infinidream(shim_obj)
+    build_infinidream(shim_obj, args.stage)
     verify_glibc_ceiling()
 
     assemble_appdir()

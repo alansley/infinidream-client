@@ -445,7 +445,10 @@ bool CClip::Update(double _timelineTime, bool isPaused)
     double secondsOut = (maxIdx - idx) / m_ClipMetadata.decodeFps - delta;
     secondsOut = std::fmin(secondsOut, (m_EndTime - _timelineTime));
 
-    if (m_FadeOutSeconds > 0 && secondsOut > 0 && secondsOut < m_FadeOutSeconds) {
+    const float fadeInSeconds = ClampFadeToLength(m_FadeInSeconds);
+    const float fadeOutSeconds = ClampFadeToLength(m_FadeOutSeconds);
+
+    if (fadeOutSeconds > 0 && secondsOut > 0 && secondsOut < fadeOutSeconds) {
         if (!m_IsFadingOut.load()) {
             g_Log->Info("Fade out started for %s: %.1f seconds remaining, idx=%u/%u",
                         m_ClipMetadata.dreamData.uuid.c_str(), secondsOut, idx, maxIdx);
@@ -459,10 +462,10 @@ bool CClip::Update(double _timelineTime, bool isPaused)
         return true;
     }
     
-    if (m_FadeOutSeconds > 0)
+    if (fadeOutSeconds > 0)
     {
-        float fadeInFactor = (float)std::fmin(secondsIn / m_FadeInSeconds, 1.f);
-        float fadeOutFactor = (float)std::fmin(secondsOut / m_FadeOutSeconds, 1.f);
+        float fadeInFactor = (float)std::fmin(secondsIn / fadeInSeconds, 1.f);
+        float fadeOutFactor = (float)std::fmin(secondsOut / fadeOutSeconds, 1.f);
         float alpha = fadeInFactor * fadeOutFactor;
 
         if (secondsOut <= 0)
@@ -593,6 +596,20 @@ bool CClip::GrabVideoFrame()
     return true;
 }
 
+float CClip::ClampFadeToLength(float _seconds) const
+{
+    const auto* info = m_spDecoder ? m_spDecoder->GetVideoInfo() : nullptr;
+    if (!info || info->m_TotalFrameCount == 0 || m_ClipMetadata.decodeFps <= 0.0)
+        return _seconds;
+    constexpr double kPreloadSeconds = 3.0;
+    // Clips too short for that get a near-cut rather than 0, which would
+    // never signal the fade-out that starts the transition.
+    constexpr double kMinFadeSeconds = 0.05;
+    const double length = info->m_TotalFrameCount / m_ClipMetadata.decodeFps;
+    const double maxFade = std::fmax((length - kPreloadSeconds) / 2.0, kMinFadeSeconds);
+    return (float)std::fmin(_seconds, maxFade);
+}
+
 bool CClip::IsNearEnd() const
 {
     if (!m_CurrentFrameMetadata.maxFrameIdx) return false;
@@ -615,7 +632,8 @@ const sFrameMetadata& CClip::GetCurrentFrameMetadata() const
 
 uint32_t CClip::GetFrameCount() const
 {
-    return m_spDecoder->GetVideoInfo()->m_TotalFrameCount;
+    const auto* info = m_spDecoder ? m_spDecoder->GetVideoInfo() : nullptr;
+    return info ? info->m_TotalFrameCount : 0;
 }
 
 void CClip::SetStartTime(double _startTime)

@@ -286,6 +286,7 @@ class CElectricSheep
                     PlatformUtils::GetAppVersion().c_str(),
                     PlatformUtils::GetGitRevision().c_str(),
                     PlatformUtils::GetBuildDate().c_str());
+        g_Log->Info("Platform: %s", PlatformUtils::GetPlatformName().c_str());
     }
 
   public:
@@ -402,11 +403,9 @@ class CElectricSheep
             ""));
 #undef BK
 
-        std::string ver = GetVersion();
-
         spHelpMessage->Add(
             new Hud::CStringStat("version", "\nVersion: ",
-                                 ver + " " + PlatformUtils::GetGitRevision() +
+                                 PlatformUtils::GetVersionDescription() +
                                      " " + PlatformUtils::GetBuildDate()));
     }
     
@@ -1041,6 +1040,11 @@ class CElectricSheep
         
         if (useAggressiveShutdown)
         {
+            // Say goodbye before arming the watchdog. Sent from
+            // DeinitializeClient() at the end of shutdown, it raced the
+            // watchdog's _exit() 200 ms later and was sometimes lost.
+            EDreamClient::SendGoodbyeAndDisconnect();
+
             // Arm a force-exit watchdog to guarantee instant shutdown.
             // The watchdog checks s_shutdownCancelled before exiting, so if
             // Startup() is called (e.g., when restarting after wizard), it
@@ -2385,11 +2389,11 @@ class CElectricSheep
                         if (g_Player().m_playlistManager) {
                             g_Player().m_playlistManager->removeCurrentDream();
                         }
-                        g_Player().SkipToNext();
+                        g_Player().SkipToNext("dislike");
                         m_spCrossFade->Reset();
                         m_HudManager->Add("fade", m_spCrossFade, 1);
                     } else {
-                        g_Player().SkipToNext();
+                        g_Player().SkipToNext("dislike");
                         m_spCrossFade->Reset();
                         m_HudManager->Add("fade", m_spCrossFade, 1);
                     }
